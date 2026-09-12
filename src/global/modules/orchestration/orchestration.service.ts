@@ -25,6 +25,7 @@ export class OrchestrationService implements OnApplicationBootstrap {
     await this.service.helper.orchestrationHelper.addValidChains();
     this.logger.log('Valid chains added!');
     // 2. Create queues/workers.
+    await this.service.queueService.HandleLiveSync();
     await this.service.queueService.EthereumMainnetHistoricalSync();
     await this.service.queueService.HistoricalSyncGap();
     await this.service.queueService.SyncGapHandler();
@@ -99,9 +100,9 @@ export class OrchestrationService implements OnApplicationBootstrap {
       'EthereumMainnetHistoricalSync',
       'EthereumMainnetHistoricalSync',
       {
-        fromBlock,
-        toBlock,
-        maxBatchSize: BigInt(maxBatchSize),
+        fromBlock: fromBlock.toString(),
+        toBlock: toBlock.toString(),
+        maxBatchSize: maxBatchSize.toString(),
         sequenceRangeId,
       },
       jobId,
@@ -165,8 +166,6 @@ export class OrchestrationService implements OnApplicationBootstrap {
       throw new Error('HistoricalSyncGap queue does not exist.');
     }
 
-    await queue.obliterate({ force: true });
-
     const result = await this.service.repo.syncGap.updateManySyncGap({
       where: {
         status: {
@@ -182,11 +181,12 @@ export class OrchestrationService implements OnApplicationBootstrap {
 
   /**
    * This method fetches the current block and handles the historical block ranges setup
+   * NOTE:we always keep our indexer one block behind the head
    */
 
   private async initiateLiveSync(chainId: ChainId) {
     const currentBlock = await this.service.ethereumProvider.getCurrentBlock(false);
-    this.firstLiveBlock = BigInt(currentBlock.number);
+    this.firstLiveBlock = BigInt(currentBlock.number) - 1n;
 
     // calculate historical sync block range based on current live block
     const syncState = await this.service.repo.syncState.findUniqueSyncState({
@@ -208,6 +208,24 @@ export class OrchestrationService implements OnApplicationBootstrap {
 
     if (syncState.live_current_block) {
       fromBlock = syncState.live_current_block + 1n;
+    }
+
+    const lastRangeWithTheSameFromBlock =
+      await this.service.repo.historicalSyncRange.findFirstHistoricalSyncRange({
+        where: {
+          from_block: fromBlock,
+        },
+      });
+
+    if (lastRangeWithTheSameFromBlock) {
+      await this.service.repo.historicalSyncRange.updateHistoricalSyncRange({
+        where: {
+          id: lastRangeWithTheSameFromBlock.id,
+        },
+        data: {
+          to_block: toBlock,
+        },
+      });
     }
 
     await this.service.repo.historicalSyncRange.upsertHistoricalSyncRange({
@@ -245,7 +263,7 @@ export class OrchestrationService implements OnApplicationBootstrap {
       'HandleLiveSync',
       {
         chainId,
-        blockNumbers: [this.firstLiveBlock],
+        blockNumbers: [this.firstLiveBlock.toString()],
       },
       jobId,
     );

@@ -3,14 +3,14 @@ import type { QueueName } from './queue-name.js';
 
 type JobDataMap = {
   EthereumMainnetHistoricalSync: {
-    fromBlock: bigint;
-    toBlock: bigint;
-    maxBatchSize: bigint;
+    fromBlock: string;
+    toBlock: string;
+    maxBatchSize: string;
     sequenceRangeId: string;
   };
   HistoricalSyncGap: {
-    fromBlock: bigint;
-    toBlock: bigint;
+    fromBlock: string;
+    toBlock: string;
     chainId: ChainId;
     gapId: string;
   };
@@ -19,7 +19,7 @@ type JobDataMap = {
   };
   HandleLiveSync: {
     chainId: ChainId;
-    blockNumbers: bigint[];
+    blockNumbers: string[];
   };
 };
 

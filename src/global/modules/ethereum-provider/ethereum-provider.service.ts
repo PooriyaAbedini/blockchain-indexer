@@ -32,7 +32,7 @@ import {
 import { ERC20Interface } from '#app/contracts/interfaces/erc20.interface.js';
 import type { ETHTransactionReceipt } from '#app/interfaces/rpc/ethereum/transaction-receipt.js';
 
-const RPC_TIMEOUT_MS = 30_000;
+const RPC_TIMEOUT_MS = 45_000;
 const RPC_MAX_ATTEMPTS = 3;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 
@@ -54,6 +54,8 @@ export class EthereumProvider {
   private readonly transferEventInterface = new Interface([
     'event Transfer(address indexed from,address indexed to,uint256 value)',
   ]);
+
+  private readonly BATCH_CONCURRENCY = 3;
 
   constructor(
     @Inject(serviceTokens.SERVICE_REGISTRY)
@@ -420,30 +422,62 @@ export class EthereumProvider {
         const symbolResult = results[i * 3 + 1];
         const decimalsResult = results[i * 3 + 2];
 
+        let name: string | null = null;
+        let symbol: string | null = null;
+        let decimals: number | null = null;
+
+        if (nameResult.success && nameResult.returnData !== '0x') {
+          try {
+            name = ERC20Interface.decodeFunctionResult(
+              'name',
+              nameResult.returnData,
+            )[0];
+          } catch (error) {
+            this.logger.warn(
+              `Failed to decode token name for ${batch[i]}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+
+        if (symbolResult.success && symbolResult.returnData !== '0x') {
+          try {
+            symbol = ERC20Interface.decodeFunctionResult(
+              'symbol',
+              symbolResult.returnData,
+            )[0];
+          } catch (error) {
+            this.logger.warn(
+              `Failed to decode token symbol for ${batch[i]}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+
+        if (decimalsResult.success && decimalsResult.returnData !== '0x') {
+          try {
+            decimals = Number(
+              ERC20Interface.decodeFunctionResult(
+                'decimals',
+                decimalsResult.returnData,
+              )[0],
+            );
+          } catch (error) {
+            this.logger.warn(
+              `Failed to decode token decimals for ${batch[i]}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+
         metadata.push({
           address: batch[i],
-          name:
-            nameResult.success && nameResult.returnData !== '0x'
-              ? ERC20Interface.decodeFunctionResult('name', nameResult.returnData)[0]
-              : null,
-
-          symbol:
-            symbolResult.success && nameResult.returnData !== '0x'
-              ? ERC20Interface.decodeFunctionResult(
-                  'symbol',
-                  symbolResult.returnData,
-                )[0]
-              : null,
-
-          decimals:
-            decimalsResult.success && nameResult.returnData !== '0x'
-              ? Number(
-                  ERC20Interface.decodeFunctionResult(
-                    'decimals',
-                    decimalsResult.returnData,
-                  )[0],
-                )
-              : null,
+          name,
+          symbol,
+          decimals,
         });
       }
     }
@@ -477,12 +511,20 @@ export class EthereumProvider {
     const receipts: ETHTransactionReceipt[] = [];
 
     try {
-      await this.acquireRateLimit();
-      for (const batch of requestBatches) {
-        const responses = await this.provider._send(batch);
-        const results = responses.map((response) => response.result);
+      for (let i = 0; i < requestBatches.length; i += this.BATCH_CONCURRENCY) {
+        const batchGroup = requestBatches.slice(i, i + this.BATCH_CONCURRENCY);
 
-        receipts.push(...results);
+        const responses = await Promise.all(
+          batchGroup.map(async (batch) => {
+            await this.acquireRateLimit();
+
+            return this.provider._send(batch);
+          }),
+        );
+
+        for (const response of responses) {
+          receipts.push(...response.map((item) => item.result));
+        }
       }
 
       this.logger.log(
@@ -493,7 +535,6 @@ export class EthereumProvider {
     } catch (error) {
       this.logger.error(
         `eth_getTransactionReceipt (batch) failed for ${txnHashes.length} transactions durationMs=${Date.now() - startedAt}`,
-
         error instanceof Error ? error.stack : String(error),
       );
 

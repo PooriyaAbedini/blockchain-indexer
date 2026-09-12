@@ -32,8 +32,8 @@ export class QueueService {
       'EthereumMainnetHistoricalSync',
 
       async (job) => {
-        const fromBlock = job.data.fromBlock;
-        const toBlock = job.data.toBlock;
+        const fromBlock = BigInt(job.data.fromBlock);
+        const toBlock = BigInt(job.data.toBlock);
         try {
           const sequence =
             await this.service.helper.queueHelper.fetchHistoricalSyncSequence(
@@ -64,8 +64,8 @@ export class QueueService {
           // Schedule the next sequence.
           const nextBlockRange =
             await this.service.helper.queueHelper.getNextBlockRange(
-              job.data.toBlock,
-              job.data.maxBatchSize,
+              toBlock,
+              BigInt(job.data.maxBatchSize),
               job.data.sequenceRangeId,
             );
 
@@ -85,8 +85,8 @@ export class QueueService {
               'EthereumMainnetHistoricalSync',
               'EthereumMainnetHistoricalSync',
               {
-                fromBlock: nextBlockRange!.fromBlock,
-                toBlock: nextBlockRange!.toBlock,
+                fromBlock: nextBlockRange!.fromBlock.toString(),
+                toBlock: nextBlockRange!.toBlock.toString(),
                 maxBatchSize: job.data.maxBatchSize,
                 sequenceRangeId: nextBlockRange.sequenceRangeId,
               },
@@ -143,8 +143,8 @@ export class QueueService {
           // Final attempt failed, but we still want the next historical job.
           const nextBlockRange =
             await this.service.helper.queueHelper.getNextBlockRange(
-              job.data.toBlock,
-              job.data.maxBatchSize,
+              BigInt(job.data.toBlock),
+              BigInt(job.data.maxBatchSize),
               job.data.sequenceRangeId,
             );
 
@@ -164,8 +164,8 @@ export class QueueService {
               'EthereumMainnetHistoricalSync',
               'EthereumMainnetHistoricalSync',
               {
-                fromBlock: nextBlockRange!.fromBlock,
-                toBlock: nextBlockRange!.toBlock,
+                fromBlock: nextBlockRange!.fromBlock.toString(),
+                toBlock: nextBlockRange!.toBlock.toString(),
                 maxBatchSize: job.data.maxBatchSize,
                 sequenceRangeId: nextBlockRange.sequenceRangeId,
               },
@@ -217,7 +217,9 @@ export class QueueService {
       'HistoricalSyncGap',
 
       async (job) => {
-        const { fromBlock, toBlock, gapId, chainId } = job.data;
+        const { gapId, chainId } = job.data;
+        const fromBlock = BigInt(job.data.fromBlock);
+        const toBlock = BigInt(job.data.toBlock);
         try {
           const maxAttempts = job.opts.attempts ?? 1;
           const currentAttempt = job.attemptsMade + 1;
@@ -277,7 +279,7 @@ export class QueueService {
             },
           });
 
-          this.logger.log(
+          this.logger.debug(
             `Historical sync gap completed successfully: ` +
               `${fromBlock}-${toBlock}`,
           );
@@ -328,7 +330,7 @@ export class QueueService {
       },
 
       {
-        concurrency: 1,
+        concurrency: 5,
       },
     );
   }
@@ -347,7 +349,7 @@ export class QueueService {
       'SyncGapHandler',
 
       async (job) => {
-        const gap = await this.service.repo.syncGap.findFirstSyncGap({
+        const gaps = await this.service.repo.syncGap.findManySyncGap({
           where: {
             chain_id: job.data.chainId,
             status: $Enums.GAP_STATUS.PENDING,
@@ -362,41 +364,47 @@ export class QueueService {
           },
         });
 
-        if (!gap) {
+        if (!gaps) {
           this.logger.log(`Found no gaps on chain id: ${job.data.chainId}`);
 
           return;
         }
 
         // Prevent future scheduler runs from picking this gap again.
-        await this.service.repo.syncGap.updateSyncGap({
-          where: {
-            id: gap.id,
-          },
-          data: {
-            status: $Enums.GAP_STATUS.QUEUED,
-          },
-        });
+        for (const gap of gaps) {
+          const updateResult = await this.service.repo.syncGap.updateSyncGap({
+            where: {
+              id: gap.id,
+            },
+            data: {
+              status: $Enums.GAP_STATUS.QUEUED,
+            },
+          });
 
-        await this.service.queue.addFIFOJob(
-          'HistoricalSyncGap',
-          'HistoricalSyncGap',
-          {
-            fromBlock: gap.from_block,
-            toBlock: gap.to_block,
-            chainId: job.data.chainId,
-            gapId: gap.id,
-          },
-          `gap-${gap.id}`,
-        );
+          this.logger.debug(
+            `Updated sync gap with id: ${updateResult.id} to QUEUED status.`,
+          );
 
-        this.logger.log(
-          `Queued gap ${gap.id} (${gap.from_block} -> ${gap.to_block})`,
-        );
+          await this.service.queue.addFIFOJob(
+            'HistoricalSyncGap',
+            'HistoricalSyncGap',
+            {
+              fromBlock: gap.from_block.toString(),
+              toBlock: gap.to_block.toString(),
+              chainId: job.data.chainId,
+              gapId: gap.id,
+            },
+            `gap-${gap.id}`,
+          );
+
+          this.logger.log(
+            `Queued gap ${gap.id} (${gap.from_block} -> ${gap.to_block})`,
+          );
+        }
       },
 
       {
-        concurrency: 1,
+        concurrency: 5,
       },
     );
   }
@@ -417,22 +425,41 @@ export class QueueService {
       'HandleLiveSync',
       async (job) => {
         const { blockNumbers, chainId } = job.data;
+        const bigIntBlockNumbers = blockNumbers.map((blockNumber) =>
+          BigInt(blockNumber),
+        );
 
         /**
          * Since we are using FIFO jobs, it is safe to consider the block with bigger number
          * as the last indexed block. using concurrency is 1 for worker there will be no problem
          */
-        const sortedBlockNumbers = blockNumbers.sort(
+        const sortedBlockNumbers = bigIntBlockNumbers.sort(
           (a, b) => (a > b ? -1 : a < b ? 1 : 0), // Desc
         );
         const lastBlock = sortedBlockNumbers[0];
 
         try {
-          const blocks: EthereumBlock<true>[] =
+          let blocks: EthereumBlock<true>[] =
             await this.service.ethereumProvider.getBlocksByNumbers(
-              blockNumbers,
+              bigIntBlockNumbers,
               true,
             );
+
+          const reorgNeeded = await this.service.helper.queueHelper.isReorgNeeded(
+            blocks,
+            chainId,
+          );
+
+          if (reorgNeeded) {
+            this.logger.log(
+              '=====================REORG NEED DETECTED=====================',
+            );
+            this.logger.log(`Handling reorg. live blocks batch: ${blockNumbers}`);
+            blocks = await this.service.helper.queueHelper.manageReorg(
+              blocks,
+              chainId,
+            );
+          }
 
           const transactionHashes = blocks.flatMap((block) =>
             block.transactions.map((txn) => txn.hash),
@@ -445,7 +472,7 @@ export class QueueService {
 
           const transferLogs =
             await this.service.ethereumProvider.getParsedTransferLogsByNumbers(
-              blockNumbers,
+              bigIntBlockNumbers,
             );
 
           const tokenAddresses = new Set<string>();

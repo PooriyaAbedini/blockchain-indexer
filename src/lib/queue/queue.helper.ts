@@ -386,7 +386,11 @@ export class QueueHelper {
       `Starting Ethereum Mainnet ${gapSync ? 'gap sync' : 'historical sync'}.\n` +
         `Provider: ${provider}\n` +
         `From Block: ${fromBlock} To Block: ${toBlock}\n` +
-        `Sync State:\n${JSON.stringify(syncState, null, 2)}`,
+        `Sync State:\n${JSON.stringify(
+          syncState,
+          (_, value) => (typeof value === 'bigint' ? value.toString() : value),
+          2,
+        )}`,
     );
 
     // change the status of historical sync to RUNNING if it is not a gap sync
@@ -607,8 +611,202 @@ export class QueueHelper {
     };
   }
 
-  createLiveSyncJobId(chainId: ChainId, blocks: bigint[]) {
-    return `handle-live-sync-${chainId}-${JSON.stringify(blocks)}-${new Date()}`;
+  async isReorgNeeded(
+    blocks: EthereumBlock<true>[],
+    chainId: number,
+  ): Promise<boolean> {
+    if (blocks.length === 0) {
+      return false;
+    }
+
+    const sortedBlocks = [...blocks].sort((a, b) =>
+      a.number < b.number ? -1 : a.number > b.number ? 1 : 0,
+    );
+
+    // 1. Validate the chain returned by the RPC itself.
+    for (let i = 1; i < sortedBlocks.length; i++) {
+      const previousBlock = sortedBlocks[i - 1];
+      const currentBlock = sortedBlocks[i];
+
+      if (
+        currentBlock.parentHash.toLowerCase() !== previousBlock.hash.toLowerCase()
+      ) {
+        this.logger.warn(
+          `Reorg detected inside live batch: ` +
+            `block=${currentBlock.number} ` +
+            `parentHash=${currentBlock.parentHash} ` +
+            `expected=${previousBlock.hash}`,
+        );
+
+        return true;
+      }
+    }
+
+    const firstBlock = sortedBlocks[0];
+
+    // The block immediately before the first block in this job.
+    if (BigInt(firstBlock.number) === 0n) {
+      return false;
+    }
+
+    const previousBlockNumber = BigInt(firstBlock.number) - 1n;
+
+    const previousBlock = await this.service.repo.block.findFirstBlock({
+      where: {
+        chain_id: chainId,
+        number: previousBlockNumber,
+      },
+      select: {
+        hash: true,
+      },
+    });
+
+    // If we don't have the previous block, this is not necessarily a reorg.
+    // It can simply mean the live indexer has not indexed it yet.
+    if (!previousBlock) {
+      return false;
+    }
+
+    if (firstBlock.parentHash.toLowerCase() !== previousBlock.hash.toLowerCase()) {
+      this.logger.warn(
+        `Reorg detected before live batch: ` +
+          `block=${firstBlock.number} ` +
+          `parentHash=${firstBlock.parentHash} ` +
+          `expected=${previousBlock.hash}`,
+      );
+
+      return true;
+    }
+
+    return false;
+  }
+
+  async manageReorg(
+    blocks: EthereumBlock<true>[],
+    chainId: number,
+  ): Promise<EthereumBlock<true>[]> {
+    const sortedBlocks = [...blocks].sort((a, b) =>
+      a.number < b.number ? -1 : a.number > b.number ? 1 : 0,
+    );
+
+    const firstIncomingBlock = sortedBlocks[0];
+
+    let candidateNumber = BigInt(firstIncomingBlock.number) - 1n;
+
+    let commonAncestor: EthereumBlock<true> | null = null;
+
+    while (candidateNumber >= 0n) {
+      const dbBlock = await this.service.repo.block.findFirstBlock({
+        where: {
+          chain_id: chainId,
+          number: candidateNumber,
+        },
+        select: {
+          number: true,
+          hash: true,
+        },
+      });
+
+      if (!dbBlock) {
+        candidateNumber--;
+        continue;
+      }
+
+      const incomingChild = sortedBlocks.find(
+        (block) =>
+          BigInt(block.number) === candidateNumber + 1n &&
+          block.parentHash.toLowerCase() === dbBlock.hash.toLowerCase(),
+      );
+
+      if (incomingChild) {
+        const cAncestor = await this.service.ethereumProvider.getBlocksByNumbers(
+          [candidateNumber],
+          true,
+        );
+        commonAncestor = cAncestor[0];
+
+        break;
+      }
+
+      candidateNumber--;
+    }
+
+    if (!commonAncestor) {
+      throw new Error(
+        `Could not find common ancestor for reorg. chainId=${chainId}`,
+      );
+    }
+
+    const reorgFrom = commonAncestor.number + 1n;
+
+    const latestIncomingBlock = sortedBlocks[sortedBlocks.length - 1];
+
+    this.logger.warn(
+      `Handling reorg: chainId=${chainId} ` +
+        `commonAncestor=${commonAncestor.number} ` +
+        `reorgFrom=${reorgFrom} ` +
+        `latest=${latestIncomingBlock.number}`,
+    );
+
+    await this.service.db.getPrisma().$transaction(async (tx) => {
+      await tx.token_transfer.deleteMany({
+        where: {
+          chain_id: chainId,
+          block_number: {
+            gte: BigInt(reorgFrom),
+          },
+        },
+      });
+
+      await tx.transaction.deleteMany({
+        where: {
+          chain_id: chainId,
+          block_number: {
+            gte: BigInt(reorgFrom),
+          },
+        },
+      });
+
+      await tx.block.deleteMany({
+        where: {
+          chain_id: chainId,
+          number: {
+            gte: BigInt(reorgFrom),
+          },
+        },
+      });
+    });
+
+    /*
+     * IMPORTANT:
+     *
+     * The blocks that triggered the reorg detection may not represent
+     * the entire replacement chain.
+     *
+     * Therefore fetch the canonical chain again from the common ancestor.
+     */
+    const blockNumbers: bigint[] = [];
+
+    for (
+      let blockNumber = BigInt(reorgFrom);
+      blockNumber <= BigInt(latestIncomingBlock.number);
+      blockNumber += 1n
+    ) {
+      blockNumbers.push(blockNumber);
+    }
+
+    const replacementBlocks = await this.service.ethereumProvider.getBlocksByNumbers(
+      blockNumbers,
+      true,
+    );
+
+    return replacementBlocks;
+  }
+
+  createLiveSyncJobId(chainId: ChainId, blocks: string[] | bigint[]) {
+    return `handle-live-sync-${chainId}-${JSON.stringify(
+      blocks.map((block) => block.toString()),
+    )}-${new Date().toISOString()}`;
   }
 
   createHistoricalSyncJobId(chainId: ChainId, fromBlock: bigint, toBlock: bigint) {

@@ -28,6 +28,13 @@ export class SyncGapRepository extends BaseRepository {
     return await this._transactionChecker(ctx).sync_gap.findUnique(args);
   }
 
+  async findManySyncGap<T extends Prisma.sync_gapFindManyArgs>(
+    args: Prisma.SelectSubset<T, Prisma.sync_gapFindManyArgs>,
+    ctx?: Context,
+  ): Promise<Prisma.sync_gapGetPayload<T>[] | null> {
+    return await this._transactionChecker(ctx).sync_gap.findMany(args);
+  }
+
   async updateSyncGap(args: Prisma.sync_gapUpdateArgs, ctx?: Context) {
     return await this._transactionChecker(ctx).sync_gap.update(args);
   }

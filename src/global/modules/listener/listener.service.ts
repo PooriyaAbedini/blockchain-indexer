@@ -106,7 +106,7 @@ export class ListenerService implements OnModuleDestroy {
   private subscribeToBlocks(provider: WebSocketProvider, chainId: ChainId): void {
     provider.on('block', (blockNumber: number) => {
       this.blockProcessingPromise = this.blockProcessingPromise
-        .then(() => this.handleBlock(provider, blockNumber, chainId))
+        .then(() => this.handleBlock(provider, blockNumber - 1, chainId))
         .catch((error) => {
           this.logger.error(
             `Failed to handle block ${blockNumber}: ${
@@ -155,19 +155,21 @@ export class ListenerService implements OnModuleDestroy {
       return;
     }
 
-    const liveBlocks: bigint[] = [];
+    const liveBlocks = new Set<bigint>();
 
     for (
       let block = this.lastEnqueuedBlock + 1n;
       block <= incomingBlock;
       block += 1n
     ) {
-      liveBlocks.push(block);
+      liveBlocks.add(block);
     }
+
+    const liveBlockNumbers = [...liveBlocks].map((block) => block.toString());
 
     const jobId = this.service.helper.queueHelper.createLiveSyncJobId(
       chainId,
-      liveBlocks,
+      liveBlockNumbers,
     );
 
     await this.service.queue.addFIFOJob(
@@ -175,7 +177,7 @@ export class ListenerService implements OnModuleDestroy {
       'HandleLiveSync',
       {
         chainId,
-        blockNumbers: liveBlocks,
+        blockNumbers: liveBlockNumbers,
       },
       jobId,
     );
@@ -183,7 +185,7 @@ export class ListenerService implements OnModuleDestroy {
     this.lastEnqueuedBlock = incomingBlock;
 
     this.logger.debug(
-      `[${new Date().toISOString()}] Enqueued live blocks ${liveBlocks[0]}-${incomingBlock}`,
+      `[${new Date().toISOString()}] Enqueued live blocks ${JSON.stringify(liveBlockNumbers)}`,
     );
   }
 

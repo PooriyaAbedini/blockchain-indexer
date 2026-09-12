@@ -69,18 +69,24 @@ export class Queue {
     opts: Partial<WorkerOptions> = {},
   ) {
     this.checkQueueExistence(queueName);
+
     const queueNamePrefix = this.getPrefixForQueueName();
+
     const worker = new Worker<JobData<T>, ReturnType>(
       `${queueNamePrefix}_${queueName}`,
       workerFunction,
       {
         ...opts,
+        lockDuration: 120_000,
+        lockRenewTime: 60_000,
         connection: this.service.db.getRedisConfig(),
         prefix: `{${queueNamePrefix}_BULLMQ}`,
       },
     );
+
     Queue.workers[workerName] = worker;
     this._workerListener(worker);
+
     return worker;
   }
 
@@ -207,18 +213,23 @@ export class Queue {
       this.logger.log(`job ${job.id}  is in progress`);
     });
 
-    worker.on(
-      'failed',
-      (job: Job<any, any, string> | undefined, failedReason: any) => {
-        this.logger.error(new Error('job is failed'), {
-          msg: failedReason,
-          job: job?.data,
-        });
-      },
-    );
+    worker.on('failed', (job, failedReason) => {
+      this.logger.error(
+        `Job failed.\n` +
+          `Queue: ${worker.name}\n` +
+          `Job: ${job?.id ?? 'unknown'}\n` +
+          `Reason: ${
+            failedReason instanceof Error ? failedReason.stack : String(failedReason)
+          }`,
+      );
+    });
 
-    worker.on('error', (err) => {
-      this.logger.error(JSON.stringify(err));
+    worker.on('error', (error) => {
+      if (error instanceof Error) {
+        this.logger.error(error.message, error.stack);
+      } else {
+        this.logger.error(String(error));
+      }
     });
   };
 

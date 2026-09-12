@@ -120,7 +120,6 @@ model txn_receipt_log {
 
   @@index([address])
   @@index([logIndex])
-  @@index([data])
   @@index([removed])
 }
 
