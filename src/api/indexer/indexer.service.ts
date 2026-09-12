@@ -230,7 +230,7 @@ export class IndexerService {
       const { maxBatchSize } = getRpcProviderLimits(provider);
 
       const syncState =
-        await this.service.helper.queueHelper.getETHMainnetSyncReport();
+        await this.service.helper.queueHelper.getSyncReportForChain(1);
 
       this.logger.log(
         `Starting Ethereum Mainnet historical sync.\n Provider: ${provider}\nMax batch request limit: ${maxBatchSize}\nSync State:\n ${JSON.stringify(syncState, null, 2)}`,

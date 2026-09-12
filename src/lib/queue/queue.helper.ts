@@ -1,7 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { ServiceRegistry } from '#app/core/service/service-registry.js';
 import { serviceTokens } from '#app/core/service/service-tokens.js';
-import type { Repository } from '#app/database/repositoryRegistry.js';
 import type { EthereumBlock } from '#app/interfaces/rpc/ethereum/blocks.js';
 import {
   $Enums,
