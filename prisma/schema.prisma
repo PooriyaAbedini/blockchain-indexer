@@ -1,0 +1,278 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/database/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model chain {
+  id   Int    @id
+  name String
+  slug String @unique
+
+  blocks          block[]
+  transactions    transaction[]
+  tokens          token[]
+  token_transfers token_transfer[]
+
+  sync_state chain_sync_state?
+
+  created_at DateTime  @default(now())
+  updated_at DateTime? @updatedAt
+}
+
+model block {
+  chain_id          Int
+  number            BigInt
+  hash              String
+  parent_hash       String
+  timestamp         DateTime
+  transaction_count Int
+  gas_limit         Decimal  @db.Decimal(78, 0)
+  gas_used          Decimal  @db.Decimal(78, 0)
+  base_fee_per_gas  Decimal? @db.Decimal(78, 0)
+  miner             String?
+
+  state_root        String?
+  transactions_root String?
+  receipts_root     String?
+
+  size       BigInt?
+  difficulty Decimal? @db.Decimal(78, 0)
+  logs_bloom String?
+
+  chain chain @relation(fields: [chain_id], references: [id], onDelete: Cascade)
+
+  transactions    transaction[]
+  token_transfers token_transfer[]
+
+  @@id([chain_id, number])
+  @@unique([chain_id, hash])
+  @@index([chain_id, parent_hash])
+}
+
+model transaction {
+  chain_id Int
+  hash     String
+
+  block_number      BigInt
+  transaction_index BigInt
+
+  from String
+  to   String?
+
+  nonce BigInt
+  value Decimal @db.Decimal(78, 0)
+
+  gas_price                Decimal? @db.Decimal(78, 0)
+  max_fee_per_gas          Decimal? @db.Decimal(78, 0)
+  max_priority_fee_per_gas Decimal? @db.Decimal(78, 0)
+  max_fee_per_blob_gas     Decimal? @db.Decimal(78, 0)
+
+  input           String
+  type            String
+  receipt         txn_receipt?
+  status          TRANSACTION_STATUS?
+  block           block               @relation(fields: [chain_id, block_number], references: [chain_id, number], onDelete: Cascade)
+  chain           chain               @relation(fields: [chain_id], references: [id], onDelete: Cascade)
+  token_transfers token_transfer[]
+
+  @@id([chain_id, hash])
+  @@index([chain_id, block_number])
+  @@index([chain_id, from])
+  @@index([chain_id, to])
+}
+
+model txn_receipt {
+  id                  String   @id @default(uuid())
+  chain_id            Int
+  transaction_hash    String
+  contract_address    String?
+  cumulative_gas_used Decimal? @db.Decimal(78, 0)
+  effective_gas_price Decimal? @db.Decimal(78, 0)
+  from                String
+  gas_used            Decimal  @db.Decimal(78, 0)
+  logs_bloom          String
+  to                  String?
+  type                String?
+
+  transaction transaction       @relation(fields: [chain_id, transaction_hash], references: [chain_id, hash], onDelete: Cascade)
+  logs        txn_receipt_log[]
+
+  @@unique([chain_id, transaction_hash])
+  @@index([chain_id, from])
+  @@index([chain_id, to])
+}
+
+model txn_receipt_log {
+  id               String  @id @default(uuid())
+  chain_id         Int
+  transaction_hash String
+  address          String
+  topics           String //It is a string which in topics are joined using ","
+  data             String
+  logIndex         BigInt
+  removed          Boolean
+
+  receipt txn_receipt @relation(fields: [chain_id, transaction_hash], references: [chain_id, transaction_hash], onDelete: Cascade)
+
+  @@index([address])
+  @@index([logIndex])
+  @@index([data])
+  @@index([removed])
+}
+
+model token {
+  id String @id @default(uuid())
+
+  chain_id Int
+  address  String
+
+  symbol   String?
+  name     String?
+  decimals Int?
+
+  chain chain @relation(fields: [chain_id], references: [id], onDelete: Cascade)
+
+  token_transfers token_transfer[]
+
+  @@unique([chain_id, address])
+  @@index([chain_id, symbol])
+  @@index([chain_id, name])
+}
+
+model token_transfer {
+  chain_id  Int
+  tx_hash   String
+  log_index BigInt
+
+  from  String
+  to    String
+  value Decimal @db.Decimal(78, 0)
+
+  block_number BigInt
+
+  token_address String
+
+  chain chain @relation(fields: [chain_id], references: [id], onDelete: Cascade)
+
+  block       block       @relation(fields: [chain_id, block_number], references: [chain_id, number], onDelete: Cascade)
+  transaction transaction @relation(fields: [chain_id, tx_hash], references: [chain_id, hash], onDelete: Cascade)
+
+  token token @relation(fields: [chain_id, token_address], references: [chain_id, address], onDelete: Cascade)
+
+  // A transaction can contain multiple Transfer logs.
+  @@id([chain_id, tx_hash, log_index])
+  @@index([chain_id, block_number])
+  @@index([chain_id, from])
+  @@index([chain_id, to])
+  @@index([chain_id, token_address])
+}
+
+model chain_sync_state {
+  chain_id Int @id
+
+  // Historical/backfill progress
+  historical_current_block BigInt?
+  historical_status        SYNC_STATUS @default(IDLE)
+
+  // Live synchronization progress
+  live_current_block BigInt?
+  live_status        SYNC_STATUS @default(IDLE)
+
+  live_started_at BigInt? // the block live sync starts from (first indexed block using live sync)
+
+  historical_ranges historical_sync_range[]
+
+  errors indexer_error[]
+
+  chain chain @relation(fields: [chain_id], references: [id], onDelete: Cascade)
+
+  created_at DateTime? @default(now())
+  updated_at DateTime? @updatedAt
+}
+
+model indexer_error {
+  id       String   @id @default(uuid())
+  error    String
+  error_at DateTime
+  chain_id Int
+
+  live_blocks String? // blocks numbers which error accured during indexing them (comma separated block numbers in string)
+  sync_state  chain_sync_state @relation(fields: [chain_id], references: [chain_id], onDelete: Cascade)
+
+  sync_type   SYNC_TYPE
+  sync_gap_id String?
+  relation    sync_gap? @relation(fields: [sync_gap_id], references: [id], onDelete: Cascade)
+  created_at  DateTime? @default(now())
+}
+
+// This table containes the ranges which historical job should process
+model historical_sync_range {
+  id         String @id @default(uuid())
+  from_block BigInt
+  to_block   BigInt
+
+  status HISTORICAL_RANGE_STATUS @default(PENDING)
+
+  chain_id   Int
+  sync_state chain_sync_state @relation(fields: [chain_id], references: [chain_id], onDelete: Cascade)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt()
+
+  @@unique([from_block, to_block, chain_id])
+}
+
+model sync_gap {
+  id String @id @default(uuid())
+
+  chain_id Int
+
+  from_block BigInt
+  to_block   BigInt
+
+  status GAP_STATUS
+
+  attempts      Int             @default(0)
+  indexer_error indexer_error[]
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@unique([chain_id, from_block, to_block])
+  @@index([chain_id, status])
+}
+
+enum HISTORICAL_RANGE_STATUS {
+  PENDING
+  FINALIZED
+}
+
+enum GAP_STATUS {
+  QUEUED
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum SYNC_STATUS {
+  IDLE
+  RUNNING
+  PAUSED
+  FAILED
+}
+
+enum TRANSACTION_STATUS {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+enum SYNC_TYPE {
+  HISTORICAL
+  LIVE
+}

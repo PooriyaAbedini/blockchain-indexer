@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "block" ALTER COLUMN "gas_limit" SET DATA TYPE DECIMAL(78,0),
+ALTER COLUMN "gas_used" SET DATA TYPE DECIMAL(78,0);
